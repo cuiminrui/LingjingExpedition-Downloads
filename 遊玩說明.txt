@@ -18,6 +18,11 @@
 同一份完整 Launcher ZIP 從 GitHub 或 Google 雲端硬碟取得，更新方式相同。
 保留前一版的合作移動、地板與敵人同步修正。連線協定仍為 protocol 3，1.2.3 與更舊版本不相容。
 
+啟動器 2.0.0：支援差異更新
+本次完整玩家包包含遊戲 1.2.5 與啟動器 2.0.0；請完整解壓縮並開根目錄 LingjingExpeditionLauncher.exe。
+有對應差異包時只下載新增／修改的檔案；沒有對應包或可重用檔案損壞時，使用完整更新包。
+Unity 合併的大型資源檔有變動時仍需下載整個檔案。已是最新版不會重新下載。
+
 下載與更新
 完整 Windows 玩家包：https://github.com/cuiminrui/LingjingExpedition-Downloads/releases/latest/download/LingjingExpedition-Launcher-Windows.zip
 最新版本與更新說明：https://github.com/cuiminrui/LingjingExpedition-Downloads/releases/latest
