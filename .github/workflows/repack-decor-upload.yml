@@ -1,0 +1,177 @@
+name: Repack verified game upload
+on:
+  push:
+    branches: [codex/upload-decor-haste-20261013]
+permissions:
+  contents: write
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Repack validated delta and publish existing release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path, PurePosixPath
+          import shutil
+          import tempfile
+          import urllib.request
+          import urllib.parse
+          import zipfile
+          
+          REPO = 'cuiminrui/LingjingExpedition-Downloads'
+          TAG = 'v1.2.15'
+          API = f'https://api.github.com/repos/{REPO}'
+          DOWNLOAD = f'https://github.com/{REPO}/releases/download'
+          PREFIX = 'incoming-decor-'
+          BACKUP = 'previous-20261013-1112-'
+          NAMES = ['latest.json', 'LingjingExpedition-Delta-1.2.14-to-1.2.15.zip',
+                   'LingjingExpedition-Launcher-Windows.zip', 'LingjingExpedition-Windows-1.2.15.zip']
+          INPUTS = {
+              'base.zip': (f'{DOWNLOAD}/v1.2.14/LingjingExpedition-Windows-1.2.14.zip', '6A915300A1EF023BBF4BB7E72E47C1CD61DDE949AD0E01A8B3C2BBF38AF89A1C'),
+              'patch.zip': (f'{DOWNLOAD}/{TAG}/{PREFIX}{NAMES[1]}', '8164C08AFF5A970981A037970015DCF54D03B07D8A98EB4E32B893FF4F6AC3C8'),
+              'launcher.zip': (f'{DOWNLOAD}/{TAG}/{NAMES[2]}', 'A0345551C9AEA797BEC90DFA6E3B3FD2D91416E07BA651BD78CFFCA1900FCA3A'),
+              'manifest.json': (f'{DOWNLOAD}/{TAG}/{PREFIX}latest.json', 'A4866B39E717AA81A5F38EB8ED8A96EEAE3B5B146798C00A6B5ECB24DF3723A7'),
+          }
+          OLD = {'latest.json': '43F62D5581BE985A37D2F51BFC96C03076B6205086D6E9D7A2C98A3D4240BA02',
+                 NAMES[1]: '90FB12A5F55840EDEAE7F45C779527B610025388084D8094174900BA323EC037',
+                 NAMES[2]: 'A0345551C9AEA797BEC90DFA6E3B3FD2D91416E07BA651BD78CFFCA1900FCA3A',
+                 NAMES[3]: '193F4AF54861B784C54679042391AED9A2348FED3CAB23CA14D44DC400A2550B'}
+          
+          def sha(path):
+              h = hashlib.sha256()
+              with open(path, 'rb') as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+                      h.update(chunk)
+              return h.hexdigest().upper()
+          
+          def extract(archive, root, skip=()):
+              with zipfile.ZipFile(archive) as z:
+                  seen = set()
+                  for item in z.infolist():
+                      p = PurePosixPath(item.filename)
+                      assert not p.is_absolute() and '..' not in p.parts and '\\' not in item.filename and ':' not in item.filename
+                      assert item.filename.casefold() not in seen
+                      seen.add(item.filename.casefold())
+                      if item.filename in skip:
+                          continue
+                      z.extract(item, root)
+          
+          def package(source, output):
+              with zipfile.ZipFile(output, 'x', zipfile.ZIP_DEFLATED, compresslevel=6) as z:
+                  for item in sorted(source.rglob('*'), key=lambda p: p.relative_to(source).as_posix().casefold()):
+                      z.write(item, item.relative_to(source).as_posix())
+              with zipfile.ZipFile(output) as z:
+                  assert z.testzip() is None
+          
+          def write_json(path, value):
+              path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+          
+          def api(method, path, data=None):
+              token = os.environ['GITHUB_TOKEN']
+              req = urllib.request.Request(API + path, data=None if data is None else json.dumps(data).encode(), method=method,
+                  headers={'Authorization': 'Bearer ' + token, 'Accept': 'application/vnd.github+json',
+                           'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28'})
+              with urllib.request.urlopen(req, timeout=120) as response:
+                  return json.load(response)
+          
+          def upload(release_id, file, name):
+              token = os.environ['GITHUB_TOKEN']
+              req = urllib.request.Request(f'https://uploads.github.com/repos/{REPO}/releases/{release_id}/assets?name=' + urllib.parse.quote(name),
+                  data=file.read_bytes(), method='POST', headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/octet-stream',
+                                                                 'Accept': 'application/vnd.github+json'})
+              with urllib.request.urlopen(req, timeout=900) as response:
+                  result = json.load(response)
+              assert result['digest'].upper() == 'SHA256:' + sha(file)
+              print('UPLOADED', name, result['size'], result['digest'], flush=True)
+              return result
+          
+          output = Path(os.environ.get('REPACK_OUTPUT_ROOT', 'repacked')).resolve()
+          output.mkdir(parents=True, exist_ok=False)
+          local = os.environ.get('LOCAL_INPUT_ROOT')
+          with tempfile.TemporaryDirectory(prefix='release-work-', dir=output.parent) as workdir:
+              work = Path(workdir)
+              for name, (url, expected) in INPUTS.items():
+                  target = work / name
+                  if local:
+                      shutil.copyfile(Path(local) / name, target)
+                  else:
+                      print('DOWNLOADING', name, flush=True)
+                      urllib.request.urlretrieve(url, target)
+                  assert sha(target) == expected, name
+              manifest = json.loads((work / 'manifest.json').read_text(encoding='utf-8-sig'))
+              with zipfile.ZipFile(work / 'patch.zip') as z:
+                  control = json.loads(z.read('.launcher-delta.json').decode('utf-8-sig'))
+              assert control['Version'] == manifest['Version'] == '1.2.15'
+              assert control['BasePackageSha256'] == INPUTS['base.zip'][1]
+              game = work / 'Game'
+              extract(work / 'base.zip', game)
+              extract(work / 'patch.zip', game, skip=('.launcher-delta.json',))
+              wanted = {f['Path']: f for f in control['Files']}
+              for item in list(game.rglob('*')):
+                  if item.is_file() and item.relative_to(game).as_posix() not in wanted:
+                      item.unlink()
+              for entry in control['Directories']:
+                  (game / entry).mkdir(parents=True, exist_ok=True)
+              (game / '遊玩紀錄').mkdir(exist_ok=True)
+              actual = {p.relative_to(game).as_posix() for p in game.rglob('*') if p.is_file()}
+              assert actual == set(wanted)
+              for name, expected in wanted.items():
+                  assert (game / name).stat().st_size == expected['SizeBytes'] and sha(game / name) == expected['Sha256'], name
+              print('TARGET_FILES_PASS', len(wanted), sha(game / 'LingjingExpedition_Data/Managed/Assembly-CSharp.dll'), flush=True)
+              windows = output / NAMES[3]
+              package(game, windows)
+              manifest['Sha256'] = sha(windows)
+              manifest['SizeBytes'] = windows.stat().st_size
+              write_json(output / NAMES[0], manifest)
+              shutil.copyfile(work / 'patch.zip', output / NAMES[1])
+              initial = work / 'InitialPlayerPackage'
+              extract(work / 'launcher.zip', initial)
+              old_game = (initial / 'Game').resolve()
+              assert old_game.parent == initial.resolve()
+              shutil.rmtree(old_game)
+              shutil.copytree(game, old_game)
+              write_json(old_game / '.launcher-version.json', {'Version': manifest['Version'], 'PackageSha256': manifest['Sha256'],
+                  'GameExecutableSha256': manifest['GameExecutableSha256'], 'InstalledUtc': manifest['PublishedUtc']})
+              package(initial, output / NAMES[2])
+              report = [{'Name': name, 'Size': (output / name).stat().st_size, 'Sha256': sha(output / name)} for name in NAMES]
+              write_json(output / 'verification.json', {'Passed': True, 'TargetFiles': len(wanted), 'AssemblySha256': wanted['LingjingExpedition_Data/Managed/Assembly-CSharp.dll']['Sha256'], 'Assets': report})
+              if not local:
+                  before = api('GET', '/releases/tags/' + TAG)
+                  assets = {a['name']: a for a in before['assets']}
+                  for name, digest in OLD.items():
+                      assert assets[name]['digest'].upper() == 'SHA256:' + digest
+                      assert BACKUP + name not in assets
+                  assert assets[PREFIX + NAMES[1]]['digest'].upper() == 'SHA256:' + INPUTS['patch.zip'][1]
+                  for name in NAMES[2:]:
+                      assert PREFIX + name not in assets
+                      upload(before['id'], output / name, PREFIX + name)
+                  api('PATCH', '/releases/assets/' + str(assets[PREFIX + NAMES[0]]['id']), {'name': 'builder-input-decor-latest.json'})
+                  upload(before['id'], output / NAMES[0], PREFIX + NAMES[0])
+                  assets = {a['name']: a for a in api('GET', '/releases/tags/' + TAG)['assets']}
+                  for name in NAMES:
+                      assert assets[PREFIX + name]['state'] == 'uploaded'
+                  for name in NAMES:
+                      api('PATCH', '/releases/assets/' + str(assets[name]['id']), {'name': BACKUP + name})
+                  for name in NAMES:
+                      api('PATCH', '/releases/assets/' + str(assets[PREFIX + name]['id']), {'name': name})
+                  after = api('GET', '/releases/tags/' + TAG)
+                  assert all(after[k] == before[k] for k in ('tag_name', 'name', 'body'))
+                  final = {a['name']: a for a in after['assets']}
+                  for item in report:
+                      assert final[item['Name']]['digest'].upper() == 'SHA256:' + item['Sha256']
+                  print('PUBLIC_RELEASE_VERIFIED_VERSION_TITLE_NOTES_UNCHANGED', flush=True)
+                  summary = os.environ.get('GITHUB_STEP_SUMMARY')
+                  if summary:
+                      with open(summary, 'a', encoding='utf-8') as stream:
+                          stream.write('## Upload verified\n\nVersion and release notes unchanged. All 171 game files verified.\n\n')
+                          stream.write('| Asset | Bytes | SHA-256 |\n|---|---:|---|\n')
+                          for item in report:
+                              stream.write(f"| {item['Name']} | {item['Size']} | {item['Sha256']} |\n")
+              print(json.dumps(report), flush=True)
+          PY
